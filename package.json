@@ -9,7 +9,8 @@
     "src",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "docs"
   ],
   "keywords": [
     "magpie",
