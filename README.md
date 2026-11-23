@@ -44,6 +44,39 @@ OpenCode 也能直接用（它只认 `config` / `auth` / `provider`，本插件�
 
 ## 登录
 
+### ★ 前提：这台机器要能出网
+
+小艺Work 的网关（`hag-drcn.op.dbankcloud.com`）和华为 OAuth
+（`oauth-login.cloud.huawei.com`）在部分网络里**必须走代理**才能访问。
+插件自己的每一次请求（换 token、签票、读目录、聊天）都会读环境里的代理：
+
+```
+MAGPIE_HTTPS_PROXY / MAGPIE_HTTP_PROXY / MAGPIE_ALL_PROXY   ← magpie 插件宿主给的
+HTTPS_PROXY / HTTP_PROXY / ALL_PROXY                          ← 兜底
+```
+
+> ⚠ **Bun 的 fetch 不吃 `socks5://`**（会报 `UnsupportedProxyProtocol`）。
+> 插件会把 `socks5://host:port` 换成同端口的 `http://host:port` ——
+> sing-box 这类 **mixed 入站**端口同时听 http 和 socks5，实测两者都通。
+
+magpie 侧要做的两件事：
+
+```bash
+# ① 全局代理（插件宿主启动时带上它，否则插件的 fetch 直连 → 断连）
+magpie settings set proxy http://127.0.0.1:1081
+
+# ② 给这个 provider 补一条带代理的条目（magpie 登录时按 provider 取代理）
+#    没有这条，登录页能打开但回调换 token 时直连失败：
+#    "The socket connection was closed unexpectedly"
+magpie provider set xiaoyiwork proxy=socks5://127.0.0.1:1081
+```
+
+改完全局代理后**要重启插件宿主**（kill 掉 `plugin-host` 进程，magpie 会自动重拉）：
+
+```bash
+pkill -f plugin-host
+```
+
 ### 方式 1：浏览器华为账号登录
 
 不需要安装小艺Work。走标准 OAuth PKCE：
@@ -56,6 +89,11 @@ PKCE(S256) → 浏览器授权 → 本地回调 127.0.0.1:17355/auth/callback
 
 ⚠ 登录要占用 **17355** 端口接回调，所以登录时**小艺Work 必须完全退出**（它会抢这个端口）。
 插件在开浏览器前会先探测端口，占用了会直接告诉你。
+
+> **手机登录**：magpie 在服务器上时，手机浏览器回调不到服务器的 `127.0.0.1:17355`。
+> magpie 会识别这种情况（`pasteCallback: true`），
+> **把浏览器最后停在的那个地址整段复制回 magpie** 即可完成登录。
+> 这一步由 magpie 完成，插件不用管。
 
 ### 方式 2：读取本机小艺Work 登录态（Windows，免输入）
 
@@ -202,6 +240,17 @@ magpie quota                        # 全部
    不假装它是正式开放的模型。
 10. **入口只能导出一个函数**。magpie 会把入口导出的每个「函数」都当插件调用，
     多导一个 `default` 就会被装配两次。
+11. **自己的 fetch 必须显式带代理**。magpie 宿主只在 `via` 里存了**该 provider 在
+    providers.json 里的 proxy**；没有这条，插件的 fetch 走 `globalProxy`
+    （宿主启动时的 `MAGPIE_*_PROXY`），而宿主常常是「no proxy」起的
+    → 直连华为 → "The socket connection was closed unexpectedly"。
+    插件自己再兜一层：从环境读代理（见 README「前提：这台机器要能出网」）。
+12. **`rate` 必须是数字**。magpie 的 `rateOf()` 只认 `number`，字符串 `"x13"` 会被读成 0，
+    倍率就显示不出来。而且 magpie 读 config 钩子的模型表时**不搬 rate** ——
+    rate 只从 models 钩子的返回值里取，所以两处都得给数字。
+13. **选项要声明 `default: true`**。magpie 的运行时读取
+    （`optionValue = optionValues(provider)[key] === true`）对没声明 default 的选项一律回 false，
+    「没设置」与「显式关掉」读不出区别 —— 不写这一行，默认该开的开关会被当成关着。
 
 ---
 

@@ -32,3 +32,26 @@
 ### 已知边界
 - 上游没有发放总量字段，额度「总计」取插件观测到的最大值当分母。
 - 方式 2（读本机登录态）仅 Windows；其它平台用华为账号浏览器登录。
+
+### 0.4.1 — 2026-11-24
+
+修掉 a 机上的**登录失败**（"The socket connection was closed unexpectedly"）和模型列表的三个问题。
+
+#### 修复
+- ★ **登录失败 = 插件自己的 fetch 没走代理**。magpie 宿主只在 `via` 里存了该 provider 在
+  `providers.json` 里的 proxy；没有这条，插件的 fetch 回落到 `globalProxy`（宿主启动时的
+  `MAGPIE_*_PROXY`），而宿主常常是「no proxy」起的 → 直连华为 → 断连。
+  新增 `src/proxy.mjs`：从 `MAGPIE_*_PROXY` / `*_PROXY` 取代理；
+  Bun 的 fetch 不吃 `socks5://`（`UnsupportedProxyProtocol`），
+  把 `socks5://host:port` 换成同端口 `http://`（mixed 入站两种都听）。
+  换 token、签票/代刷、聊天请求与重试全部带上。
+  实测：同一请求 direct → `socket closed unexpectedly`；带代理 → `HTTP 400 invalid code`（到了华为）。
+- **倍率显示不出来**：`rate` 必须是数字（magpie 的 `rateOf()` 只认 number），
+  且 magpie 读 config 钩子的模型表时**不搬 rate** —— rate 只从 models 钩子取，两处都给数字。
+- **Kimi K3.1 Pro 在模型列表里消失**：选项 `show_gray` 必须声明 `default: true`
+  （magpie 的运行时读取对没声明 default 的选项一律回 false，「没设置」与「显式关掉」读不出区别）。
+- **名字成「Kimi K3.1 Pro（灰度）（灰度）」**：config 钩子标过一次，models 钩子又标一次。
+
+#### 文档
+- README 加「前提：这台机器要能出网」一节：`magpie settings set proxy`、
+  `magpie provider set xiaoyiwork proxy=`、改完全局代理要 `pkill -f plugin-host`。
