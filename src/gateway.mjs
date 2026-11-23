@@ -21,10 +21,10 @@ export function readJsonSafe(text) {
   }
 }
 
-/** "消耗8x" → "x8"（magpie 的 rate 字段） */
+/** "消耗8x" → "x8"（magpie 的 rate 字段）；也吃 "x8" / "8x" / "8" */
 export function normalizeRate(raw) {
   if (typeof raw !== 'string') return undefined
-  const m = raw.match(/(\d+(?:\.\d+)?)\s*[x×]/i)
+  const m = raw.match(/([0-9]+(?:\.[0-9]+)?)\s*[x×]/i) || raw.match(/^[x×]\s*([0-9]+(?:\.[0-9]+)?)$/i)
   if (!m) return undefined
   const n = Number(m[1])
   if (!Number.isFinite(n) || n === 0) return undefined
@@ -146,7 +146,7 @@ export function transformSse(upstream, modelHint) {
   })
 }
 
-/** SSE → 聚合后的单个 chat.completion（stream:false 用） */
+/** SSE → 聚合后的单个 chat.completion（stream:false 用）。入参是 ReadableStream。 */
 export async function aggregate(upstream, modelHint) {
   const decoder = new TextDecoder()
   let buf = ''
@@ -182,8 +182,9 @@ export async function aggregate(upstream, modelHint) {
     if (choice.finish_reason) acc.finish = choice.finish_reason
   }
 
+  const reader = upstream.getReader()
   for (;;) {
-    const { value, done } = await upstream.read()
+    const { value, done } = await reader.read()
     if (done) break
     buf += decoder.decode(value, { stream: true }).replace(/\r\n?/g, '\n')
     let idx
