@@ -22,6 +22,7 @@ import path from 'node:path'
 import { XiaoyiWorkAuthPlugin, _internal } from '../index.mjs'
 import { aggregate, frameToText, normalizeRate, patchChunk, transformSse } from '../src/gateway.mjs'
 import { duplicateError, findAccountSlots } from '../src/accounts.mjs'
+import { proxyFromEnv, toBunProxy, withProxy } from '../src/proxy.mjs'
 
 let failed = 0
 const results = []
@@ -54,8 +55,44 @@ await t('config 里 Kimi K3.1 Pro 标注灰度', async () => {
   const plugin = await XiaoyiWorkAuthPlugin({ directory: os.tmpdir(), magpie: {} })
   const cfg = {}
   await plugin.config(cfg)
-  assert.match(cfg.provider.xiaoyiwork.models['Kimi_K3.1_Pro_VE'].name, /灰度/)
-  assert.equal(cfg.provider.xiaoyiwork.models['Kimi_K3.1_Pro_VE'].rate, 'x13')
+  const kimi = cfg.provider.xiaoyiwork.models['Kimi_K3.1_Pro_VE']
+  assert.match(kimi.name, /灰度/)
+  // ★ rate 必须是数字：magpie 的 rateOf() 只认数字，字符串 "x13" 会被读成 0
+  assert.equal(kimi.rate, 13)
+})
+
+await t('★ 所有模型的 rate 都是数字（magpie 只认数字）', async () => {
+  const plugin = await XiaoyiWorkAuthPlugin({ directory: os.tmpdir(), magpie: {} })
+  const cfg = {}
+  await plugin.config(cfg)
+  for (const [id, m] of Object.entries(cfg.provider.xiaoyiwork.models)) {
+    if (m.rate !== undefined) assert.equal(typeof m.rate, 'number', `${id} 的 rate 不是数字：${m.rate}`)
+  }
+})
+
+await t('★ show_gray 默认开：Kimi K3.1 Pro 在列表里', async () => {
+  // magpie 的运行时读取对没声明 default:true 的选项一律回 false，
+  // 所以选项必须声明 default:true，否则灰度模型会被整条剔除。
+  const plugin = await XiaoyiWorkAuthPlugin({ directory: os.tmpdir(), magpie: {} })
+  const opt = plugin.auth.options.find((o) => o.key === 'show_gray')
+  assert.ok(opt, '没有声明 show_gray 选项')
+  assert.equal(opt.default, true, 'show_gray 没声明 default:true')
+  const cfg = {}
+  await plugin.config(cfg)
+  assert.ok(cfg.provider.xiaoyiwork.models['Kimi_K3.1_Pro_VE'], '默认列表里没有 Kimi K3.1 Pro')
+})
+
+await t('show_gray=false 时灰度模型被剔除', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'xy-opt-'))
+  writeFileSync(
+    path.join(dir, 'plugins.json'),
+    JSON.stringify({ plugins: [{ spec: '/root/mg-plugins/xiaoyiwork', options: { xiaoyiwork: { show_gray: false } } }] }),
+  )
+  const plugin = await XiaoyiWorkAuthPlugin({ directory: dir, magpie: {} })
+  const cfg = {}
+  await plugin.config(cfg)
+  assert.equal(cfg.provider.xiaoyiwork.models['Kimi_K3.1_Pro_VE'], undefined, '灰度模型没被剔除')
+  assert.ok(cfg.provider.xiaoyiwork.models.Kimi_K3, '非灰度模型不该受影响')
 })
 
 await t('patience = 240（Kimi 首字延迟可超 110s）', async () => {
@@ -164,6 +201,32 @@ await t('入口只导出一个插件函数（magpie 会把每个函数导出都�
   const fns = Object.entries(mod).filter(([, v]) => typeof v === 'function')
   assert.equal(fns.length, 1, `导出了 ${fns.length} 个函数导出：${fns.map(([k]) => k).join(',')}`)
   assert.equal(fns[0][0], 'XiaoyiWorkAuthPlugin')
+})
+
+/* ------------------------------------------------------------- 出口代理 */
+
+await t('代理从环境里读（宿主给的是 MAGPIE_*_PROXY）', () => {
+  assert.equal(proxyFromEnv({ MAGPIE_HTTPS_PROXY: 'http://127.0.0.1:1081' }), 'http://127.0.0.1:1081')
+  assert.equal(proxyFromEnv({ HTTPS_PROXY: 'http://p:1' }), 'http://p:1')
+  assert.equal(proxyFromEnv({ ALL_PROXY: 'http://p:2' }), 'http://p:2')
+  assert.equal(proxyFromEnv({}), '')
+})
+
+await t('★ socks5:// 换成 http://（Bun 的 fetch 不吃 socks5，会报 UnsupportedProxyProtocol）', () => {
+  assert.equal(toBunProxy('socks5://127.0.0.1:1081'), 'http://127.0.0.1:1081')
+  assert.equal(toBunProxy('socks5h://127.0.0.1:1081'), 'http://127.0.0.1:1081')
+  assert.equal(toBunProxy('http://127.0.0.1:1081'), 'http://127.0.0.1:1081')
+  assert.equal(toBunProxy(''), '')
+})
+
+await t('withProxy 带上代理，且不覆盖调用方自己给的', () => {
+  const a = withProxy({ method: 'POST' }, 'socks5://127.0.0.1:1081')
+  assert.equal(a.proxy, 'http://127.0.0.1:1081')
+  assert.equal(a.method, 'POST')
+  const b = withProxy({ proxy: 'http://own:1' }, 'http://other:2')
+  assert.equal(b.proxy, 'http://own:1')
+  const c = withProxy({ method: 'GET' }, '')
+  assert.equal(c.proxy, undefined)
 })
 
 /* ------------------------------------------------------------------ 输出 */

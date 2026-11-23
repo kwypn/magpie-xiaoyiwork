@@ -30,8 +30,10 @@ import {
   PROVIDER_NAME,
   SSE_BASE,
   CHAT_PATH,
+  rateNumber,
 } from './src/context.mjs'
 import { aggregate, hagHeaders, patchChunk, readJsonSafe, transformSse } from './src/gateway.mjs'
+import { proxyFromEnv, withProxy } from './src/proxy.mjs'
 import {
   deviceIdFor,
   ensureFreshState,
@@ -120,8 +122,18 @@ export async function XiaoyiWorkAuthPlugin(input = {}) {
    *   默认**列出** Kimi K3.1 Pro —— 用户明确要这个模型，
    *   但要标「灰度」并把倍率（上游 13x，最贵）显示出来，别让人以为免费。
    *   开关 show_gray=false 时才隐藏。
+   *
+   * ⚠ 默认值不能靠 `!== false` 判断：magpie 的运行时读取
+   *   （magpie.option(provider,key)）对**没声明 default:true** 的选项一律回 false
+   *   （optionValue = optionValues(provider)[key] === true，optionValues 用 o.default 兜底），
+   *   所以「没设置」和「显式关掉」在运行时是同一个 false，读不出区别。
+   *   → 选项声明里写 default: true，运行时读到的就是 true；读不到（undefined）时按默认开。
    */
-  const showGray = () => readOption('show_gray', 'showGray') !== false
+  const showGray = () => {
+    const v = readOption('show_gray', 'showGray')
+    if (v === undefined || v === null) return true
+    return v === true || v === 'true' || v === 1 || v === '1' || v === 'on'
+  }
 
   /** 同一账号只允许一个：返回 null 表示可以继续，否则返回要报给用户的错误 */
   const guardDuplicate = (uid) => {
@@ -145,6 +157,19 @@ export async function XiaoyiWorkAuthPlugin(input = {}) {
         continue
       }
       out[id] = model
+    }
+    return out
+  }
+
+  /**
+   * 静态兜底表也要把 rate 归一成**数字**：
+   * magpie 的 rateOf() 只认数字（typeof v === "number"），字符串 "x13" 会读成 0。
+   */
+  const staticModels = () => {
+    const out = {}
+    for (const [id, model] of Object.entries(DEFAULT_MODELS)) {
+      const rate = rateNumber(model.rate)
+      out[id] = rate ? { ...model, rate } : { ...model, rate: undefined }
     }
     return out
   }
@@ -179,12 +204,20 @@ export async function XiaoyiWorkAuthPlugin(input = {}) {
         bodyText = JSON.stringify(bodyObj)
       }
 
-      let res = await fetch(target, {
-        method: init.method || 'POST',
-        headers,
-        body: bodyText,
-        signal: init.signal,
-      })
+      let res = await fetch(
+        target,
+        withProxy(
+          {
+            method: init.method || 'POST',
+            headers,
+            body: bodyText,
+            signal: init.signal,
+          },
+          // ★ 走代理：宿主给 loader 的 fetch 的代理是「provider 在 providers.json 里的
+          //   proxy」，插件自己这层再兜一次（环境里的全局代理），两边都拿不到时直连。
+          proxyFromEnv(),
+        ),
+      )
 
       // 凭据过期：本机模式静默重读一次
       if ((res.status === 401 || res.status === 403) && holder.fromLocal) {
@@ -193,7 +226,13 @@ export async function XiaoyiWorkAuthPlugin(input = {}) {
           if (fresh.credential !== holder.credential) {
             Object.assign(holder, fresh, { fromLocal: true })
             for (const [k, v] of Object.entries(hagHeaders({ ...holder }))) headers.set(k, v)
-            res = await fetch(target, { method: init.method || 'POST', headers, body: bodyText, signal: init.signal })
+            res = await fetch(
+              target,
+              withProxy(
+                { method: init.method || 'POST', headers, body: bodyText, signal: init.signal },
+                proxyFromEnv(),
+              ),
+            )
           }
         } catch {
           /* 保持原样 */
@@ -252,7 +291,7 @@ export async function XiaoyiWorkAuthPlugin(input = {}) {
         // Kimi K3.1 Pro 等慢思考模型对大提示词的首字延迟可超 110s，
         // magpie 默认 60s 会把「上游失联」判成 502。240s 是 magpie 的上限。
         patience: 240,
-        models: visibleModels(DEFAULT_MODELS),
+        models: visibleModels(staticModels()),
       }
     },
 
@@ -269,6 +308,10 @@ export async function XiaoyiWorkAuthPlugin(input = {}) {
         {
           key: 'show_gray',
           label: 'Show grey (beta) models',
+          // ★ default 必须写 true：magpie 的运行时读取对没声明 default:true 的选项
+          //   一律回 false（optionValue === true），「没设置」与「显式关掉」读不出区别。
+          //   不写这一行，Kimi K3.1 Pro 在运行时会被当成「关」而整条消失。
+          default: true,
           description:
             "Also list the models XiaoyiWork marks grey (Kimi K3.1 Pro). XiaoyiWork's own model picker keeps them disabled as \"in grey testing, not selectable yet\", so they are unofficial here — they work, but they are billed at the highest rate the upstream quotes (13x AI points).",
           labels: { zh: '显示灰度测试模型', 'zh-TW': '顯示灰度測試模型' },
@@ -379,7 +422,10 @@ export async function XiaoyiWorkAuthPlugin(input = {}) {
           out[item.id] = {
             ...rest,
             name: (item.name || base.name) + (gray ? '（灰度）' : ''),
-            ...(item.rate ? { rate: item.rate } : {}),
+            // ★ rate 必须是**数字**：magpie 的 rateOf() 只认数字，
+            //   字符串 "x13" 会被读成 0（倍率显示不出来）。
+            //   上游目录给的是 "消耗13x" 这种文本，先归一成 13。
+            ...(rateNumber(item.rate) ? { rate: rateNumber(item.rate) } : {}),
           }
         }
         // 兜底：目录没列出的默认模型仍然保留

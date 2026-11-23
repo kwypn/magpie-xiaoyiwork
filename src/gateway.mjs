@@ -10,6 +10,8 @@
 
 import crypto from 'node:crypto'
 
+import { withProxy, proxyFromEnv } from './proxy.mjs'
+
 export const traceId = () => 'mp-' + crypto.randomBytes(8).toString('hex')
 export const b64url = (buf) => Buffer.from(buf).toString('base64url')
 
@@ -47,7 +49,10 @@ export function hagHeaders({ credential, uid, deviceId, trace = traceId(), sse =
 
 export async function postJson(url, { headers, body, signal, timeoutMs = 30000 }) {
   const sig = signal ?? AbortSignal.timeout(timeoutMs)
-  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: sig })
+  // ★ 走代理：华为网关在直连不通的机器上会断连
+  //   （"The socket connection was closed unexpectedly"）。
+  const init = withProxy({ method: 'POST', headers, body: JSON.stringify(body), signal: sig }, proxyFromEnv())
+  const res = await fetch(url, init)
   const text = await res.text()
   return { status: res.status, ok: res.ok, text, json: readJsonSafe(text) }
 }

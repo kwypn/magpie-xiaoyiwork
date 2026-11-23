@@ -17,6 +17,7 @@ import http from 'node:http'
 import { ENDPOINTS, OAUTH } from './context.mjs'
 import { b64url, readJsonSafe } from './gateway.mjs'
 import { createCredential, deviceIdFor, readLocalCredential } from './credential.mjs'
+import { proxyFetch } from './proxy.mjs'
 
 export function buildAuthorizeUrl(challenge, state) {
   const q = new URLSearchParams({
@@ -99,7 +100,9 @@ export async function exchangeCode(code, verifier) {
     code_verifier: verifier,
     redirect_uri: OAUTH.redirectUri,
   })
-  const res = await fetch(ENDPOINTS.token, {
+  // ★ 走代理：华为的 OAuth 端点在直连不通的机器上就是
+  //   "The socket connection was closed unexpectedly"。
+  const res = await proxyFetch(ENDPOINTS.token, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body,

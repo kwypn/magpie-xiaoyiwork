@@ -15,6 +15,7 @@ import { execFileSync } from 'node:child_process'
 
 import { ENDPOINTS, OAUTH } from './context.mjs'
 import { hagHeaders, postJson, readJsonSafe, traceId } from './gateway.mjs'
+import { withProxy, proxyFromEnv } from './proxy.mjs'
 
 /* ------------------------------------------------------------------ 设备标识 */
 
