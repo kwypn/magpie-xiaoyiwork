@@ -142,10 +142,32 @@ export async function XiaoyiWorkAuthPlugin(input = {}) {
     return slots.length ? duplicateError(slots, uid) : null
   }
 
-  /** 灰度模型标注 */
+  /**
+   * 灰度模型标注：名字后缀只加一次。
+   * （config 钩子已经标过的，models 钩子再标就成「Kimi K3.1 Pro（灰度）（灰度）」）
+   */
   const decorate = (id, model) => {
     if (!GRAY_MODELS.has(id)) return model
-    return { ...model, name: `${model.name}（灰度）` }
+    const name = String(model.name ?? id)
+    if (name.includes('（灰度）')) return model
+    return { ...model, name: `${name}（灰度）` }
+  }
+
+  /**
+   * ★ rate 必须是**数字**，而且要由 models 钩子带上去。
+   *
+   * magpie 读 config 钩子给的模型表时，只搬 name/api/cost/limit/options/headers/
+   * capabilities/variants 这些字段，**不搬 rate**；rate 只从 models 钩子的返回值里
+   * 取（provider 列表里的 rate: rateOf(m.rate)，rateOf 只认 number）。
+   * 所以：config 钩子里的 rate 只是备份，真正生效的是 models 钩子返回的那份，
+   * 两边都得是数字。
+   */
+  const withRate = (model, fallback) => {
+    const rate = rateNumber(model?.rate) ?? rateNumber(fallback?.rate)
+    const out = { ...model }
+    if (rate) out.rate = rate
+    else delete out.rate
+    return out
   }
 
   const visibleModels = (models) => {
@@ -153,10 +175,10 @@ export async function XiaoyiWorkAuthPlugin(input = {}) {
     for (const [id, model] of Object.entries(models ?? {})) {
       if (GRAY_MODELS.has(id)) {
         if (!showGray()) continue
-        out[id] = decorate(id, model)
+        out[id] = decorate(id, withRate(model, DEFAULT_MODELS[id]))
         continue
       }
-      out[id] = model
+      out[id] = withRate(model, DEFAULT_MODELS[id])
     }
     return out
   }
@@ -168,8 +190,7 @@ export async function XiaoyiWorkAuthPlugin(input = {}) {
   const staticModels = () => {
     const out = {}
     for (const [id, model] of Object.entries(DEFAULT_MODELS)) {
-      const rate = rateNumber(model.rate)
-      out[id] = rate ? { ...model, rate } : { ...model, rate: undefined }
+      out[id] = withRate(model)
     }
     return out
   }
@@ -419,14 +440,15 @@ export async function XiaoyiWorkAuthPlugin(input = {}) {
             limit: { context: 1000000, output: 32000 },
           }
           const { status, ...rest } = base
-          out[item.id] = {
+          out[item.id] = decorate(item.id, {
             ...rest,
-            name: (item.name || base.name) + (gray ? '（灰度）' : ''),
-            // ★ rate 必须是**数字**：magpie 的 rateOf() 只认数字，
+            name: item.name || base.name,
+            // ★ rate 必须是**数字**：magpie 的 rateOf() 只认 number，
             //   字符串 "x13" 会被读成 0（倍率显示不出来）。
-            //   上游目录给的是 "消耗13x" 这种文本，先归一成 13。
-            ...(rateNumber(item.rate) ? { rate: rateNumber(item.rate) } : {}),
-          }
+            //   上游目录给的是 "消耗13x" 这种文本，先归一成 13；
+            //   目录没给就沿用静态表里的倍率。
+            rate: rateNumber(item.rate) ?? rateNumber(base.rate),
+          })
         }
         // 兜底：目录没列出的默认模型仍然保留
         for (const [id, model] of Object.entries(visibleModels(provider.models))) if (!out[id]) out[id] = model

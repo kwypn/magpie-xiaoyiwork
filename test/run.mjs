@@ -196,6 +196,28 @@ await t('normalizeAuth 需要 credential + uid', () => {
   assert.ok(s.deviceId.endsWith('_U1'))
 })
 
+await t('★ 灰度后缀只加一次（不能成「（灰度）（灰度）」）', async () => {
+  const plugin = await XiaoyiWorkAuthPlugin({ directory: os.tmpdir(), magpie: {} })
+  const cfg = {}
+  await plugin.config(cfg)
+  const name = cfg.provider.xiaoyiwork.models['Kimi_K3.1_Pro_VE'].name
+  const hits = name.split('（灰度）').length - 1
+  assert.equal(hits, 1, `灰度后缀出现 ${hits} 次：${name}`)
+})
+
+await t('★ models 钩子返回的 rate 也是数字（magpie 只从 models 钩子取 rate）', async () => {
+  // 没登录时 models 钩子回退到 config 的表，那份也得是数字
+  const plugin = await XiaoyiWorkAuthPlugin({ directory: os.tmpdir(), magpie: {} })
+  const cfg = {}
+  await plugin.config(cfg)
+  const models = await plugin.provider.models({ models: cfg.provider.xiaoyiwork.models }, { auth: null })
+  const kimi = models['Kimi_K3.1_Pro_VE']
+  assert.ok(kimi, 'models 钩子没返回 Kimi K3.1 Pro')
+  assert.equal(kimi.rate, 13, `Kimi K3.1 Pro 的 rate 不是 13：${kimi.rate}`)
+  const hits = String(kimi.name).split('（灰度）').length - 1
+  assert.equal(hits, 1, `灰度后缀出现 ${hits} 次：${kimi.name}`)
+})
+
 await t('入口只导出一个插件函数（magpie 会把每个函数导出都当插件调用）', async () => {
   const mod = await import('../index.mjs')
   const fns = Object.entries(mod).filter(([, v]) => typeof v === 'function')
