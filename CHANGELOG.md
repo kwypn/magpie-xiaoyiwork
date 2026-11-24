@@ -55,3 +55,29 @@
 #### 文档
 - README 加「前提：这台机器要能出网」一节：`magpie settings set proxy`、
   `magpie provider set xiaoyiwork proxy=`、改完全局代理要 `pkill -f plugin-host`。
+
+## 0.4.2 — 2026-11-24
+
+修掉**思维链侧漏到会话正文**。
+
+### 修复
+- ★ **客户端看到的是思维链而不是回答**。现象：问「你是什么模型」，会话里出现
+  `I'll respond to the user asking "你是什么模型" ...` 这样的思维链正文。
+  根因：`withContentFallback` 是**逐帧**判断「这帧 content 为空吗 → 有 reasoning 就补」，
+  而 Kimi 的每一帧都只有 `reasoning_content`、content 是空的（思维链一段段吐、正文最后才来）
+  → 逐帧判断永远成立 → 每帧都把思维链复制进 content。
+  修法：兜底改成**整段流级别** —— 留最后一帧到流结束才发，全程记「有没有见过真正的 content」；
+  出现过正文就原样透传；整段都没有正文（模型真把答案写进思维链）时才把思维链补成正文。
+  `aggregate`（非流式）本来就是整段结束时才判，逻辑已对、未改。
+
+### 实测（a 机，真 Kimi 流）
+```
+修复前 client content = "I need respond in Chinese user asks what model I should say Kimi我是 Kimi..."
+修复后 client content = "我是 Kimi，由 Moonshot AI（月之暗面）开发的大语言模型。..."
+reasoning_content 826 字完整保留在思维链字段里，不进正文
+```
+DeepSeek-V4 / GLM-5.3-Flash / MiniMax-M3.1 / Kimi-K3 四个模型同样验过，流式与聚合都干净。
+经 magpie 网关的真实客户端链路复验：无侧漏。
+
+### 测试
+新增 3 条回归用例，已验证「回退修复后新用例立刻失败」（能抓住这个 bug），测试 22/22。
