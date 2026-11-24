@@ -1,6 +1,6 @@
 {
   "name": "magpie-xiaoyiwork",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Magpie / OpenCode provider plugin for 小艺Work (Huawei Celia): DeepSeek-V4, GLM-5.3, Kimi K3.1 Pro, Kimi K3, MiniMax M3.1, openPangu — vision, AI-point rate, OAuth sign-in, 7-day auto-renew",
   "type": "module",
   "main": "./index.mjs",

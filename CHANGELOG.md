@@ -81,3 +81,47 @@ DeepSeek-V4 / GLM-5.3-Flash / MiniMax-M3.1 / Kimi-K3 四个模型同样验过，
 
 ### 测试
 新增 3 条回归用例，已验证「回退修复后新用例立刻失败」（能抓住这个 bug），测试 22/22。
+
+## 0.4.3 — 2026-11-25
+
+修掉**思考内容双重输出**。
+
+### 修复
+- ★★ **同一段思考被输出两遍**（一遍在思维链区、一遍在正文区）。
+  根因：0.4.2 那个「思维链侧漏」修复的兜底判据只有一条 ——
+  「整段没有正文 → 把思维链当正文补上」。
+  但「没有正文」还有另一种情况：**模型在调工具**。
+  Kimi 的 agent 回合就是「思维链 + tool_calls、没有正文」——
+  这不是「答案藏在思维链里」，而是「模型正在决定调哪个工具」。
+  兜底把思维链补成正文后，客户端同时拿到
+  ```
+  content           = 思维链
+  reasoning_content = 思维链     ← 同一段话两遍
+  ```
+  两个字段都渲染 → 双重输出。
+  ★ 这是 0.4.2 那个修复引入的（它修的是「逐帧补」，
+    但补的**触发条件**没排除 tool_calls 回合）。
+
+  修法：兜底加一道条件 —— 整段出现过 tool_calls 就不补。
+  · 流式 `transformSse`：记 `sawToolCall`，结尾判断加上它
+  · 非流式 `aggregate`：`content` 的兜底加 `toolCalls.length === 0`
+  · 新增 `hasToolCall(frame)`：认 `delta.tool_calls` / `delta.function_call` /
+    `finish_reason === 'tool_calls'`
+
+### 实测（a 机，win 端同款入口 3425，agent 场景带 tools）
+```
+修复后：content 0 字 | reasoning 190 字 | tool_call 帧 6   → 无双重输出 ✓
+```
+### 排查过程（都不是原因，逐一排除）
+- 上游华为网关：raw 流实测 `done=true`、有 `finish_reason:stop`、帧分隔符是 `\n\n` → 正常
+- gwkey(3425) 的 `_wrap_sse`：reasoning 与 content 是分字段推的 → 干净
+- magpie(3430)：未走这条链路（win 端直连 3425）
+- ⇒ 重复确实出自插件这一层
+
+### 测试
+新增 2 条回归用例（流式 + 聚合），已验证「回退修复后立刻失败」：
+```
+✗ ★★ agent 回合（思维链 + tool_calls、没有正文）→ 思维链绝不进 content
+   — ★ 思维链漏进了 content："我需要先看目录，然后读文件"
+```
+测试 24/24。
