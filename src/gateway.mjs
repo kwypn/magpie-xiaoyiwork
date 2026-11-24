@@ -88,29 +88,66 @@ export function frameToText(block, modelHint) {
 /**
  * ★ Kimi K3.1 Pro 的已知坑：有帧里 reasoning_content 有内容而 content 是空的
  *   （长上下文/受限场景下模型把答案写进思维链）。
- *   直接透传会让客户端拿到空回答。→ 空 content 且有 reasoning 时，补一份 content。
+ *   直接透传会让客户端拿到空回答。
+ *
+ * ⚠⚠ 必须是**整段流**级别判断，不能逐帧判断！
+ *
+ *   逐帧判断的致命错误（2026-11-24 实测踩到）：
+ *   Kimi 的每一帧都只有 `reasoning_content`、没有 `content`（思维链一段段吐，
+ *   正文在最后几帧才来）。逐帧看"这帧 content 为空"永远成立 →
+ *   每帧都把思维链复制进 content → 客户端看到的是
+ *   「I'll respond to the user asking ...」这样的**思维链正文**，
+ *   而不是模型的回答 —— 这就是「思考段漏到会话里」的现象。
+ *
+ *   正确做法：先原样透传整段流；同时记下"有没有见过真正的 content"。
+ *   流结束时如果**从头到尾没有过任何 content**，才是真的"模型把答案写进了
+ *   思维链"，这时才把 reasoning 补成 content。
  */
-export function withContentFallback(frame) {
+export function hasContentText(frame) {
+  const choices = frame?.choices
+  if (!Array.isArray(choices) || !choices.length) return false
+  const c = choices[0]
+  const delta = c?.delta ?? c?.message
+  const content = delta?.content
+  return typeof content === 'string' && content.length > 0
+}
+
+/** 一帧里的 reasoning 文本（没有则空串） */
+export function frameReasoning(frame) {
+  const choices = frame?.choices
+  if (!Array.isArray(choices) || !choices.length) return ''
+  const delta = choices[0]?.delta ?? choices[0]?.message
+  const r = delta?.reasoning_content ?? delta?.reasoning
+  return typeof r === 'string' ? r : ''
+}
+
+/**
+ * 整段流结束时才用：把「只有思维链、没有正文」的流补一份正文。
+ * 有过任何正文 → 原样返回（思维链绝不进 content）。
+ */
+export function withContentFallback(frame, { sawContent, reasoning } = {}) {
   if (!frame || typeof frame !== 'object') return frame
+  if (sawContent) return frame
+  const text = typeof reasoning === 'string' ? reasoning : ''
+  if (!text) return frame
   const choices = frame.choices
   if (!Array.isArray(choices) || !choices.length) return frame
   const c = choices[0]
   const delta = c?.delta ?? c?.message
   if (!delta) return frame
-  const hasContent = typeof delta.content === 'string' && delta.content.length > 0
-  const hasReasoning =
-    (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) ||
-    (typeof delta.reasoning === 'string' && delta.reasoning.length > 0)
-  if (hasContent || !hasReasoning) return frame
-  const reasoning = delta.reasoning_content ?? delta.reasoning
-  const out = { ...frame, choices: [{ ...c, delta: { ...delta, content: reasoning } }] }
+  const out = { ...frame, choices: [{ ...c, delta: { ...delta, content: text } }] }
   if (Array.isArray(frame.choices)) {
     out.choices = frame.choices.map((x, i) => (i === 0 ? out.choices[0] : x))
   }
   return out
 }
 
-/** SSE → 标准 SSE 流（补 [DONE]、补字段、空 content 兜底） */
+/**
+ * SSE → 标准 SSE 流（补 [DONE]、补字段）。
+ *
+ * ★ 思维链绝不进 content：整段流里只要出现过一次真正的 content，
+ *   就原样透传；只有在**整段都没有正文**时，才在最后一帧把思维链补成正文。
+ */
 export function transformSse(upstream, modelHint) {
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
@@ -119,6 +156,18 @@ export function transformSse(upstream, modelHint) {
     async start(controller) {
       const reader = upstream.getReader()
       const push = (text) => text && controller.enqueue(encoder.encode(text))
+      // 整段流的账：有没有见过正文、思维链累计了多少
+      let sawContent = false
+      let reasoning = ''
+      // 最后一帧先扣着：万一段落结束时才知道要补正文，这一帧正好是落点
+      let pending = null
+      const emit = (frame) => {
+        if (!frame) return
+        if (hasContentText(frame)) sawContent = true
+        const r = frameReasoning(frame)
+        if (r) reasoning += r
+        push(`data: ${JSON.stringify(frame)}\n\n`)
+      }
       try {
         for (;;) {
           const { value, done } = await reader.read()
@@ -130,12 +179,31 @@ export function transformSse(upstream, modelHint) {
             buf = buf.slice(idx + 2)
             const raw = frameToText(block, modelHint)
             if (!raw) continue
-            const patched = withContentFallback(readJsonSafe(raw.slice(6).trim()))
-            push(`data: ${JSON.stringify(patched)}\n\n`)
+            const frame = readJsonSafe(raw.slice(6).trim())
+            if (!frame) continue
+            // 留最后一帧到流结束再发（要扣着它，才知道整段有没有正文）
+            if (pending) emit(pending)
+            pending = frame
           }
         }
         const tail = frameToText(buf, modelHint)
-        if (tail) push(tail)
+        if (tail) {
+          const frame = readJsonSafe(tail.slice(6).trim())
+          if (frame) {
+            if (pending) emit(pending)
+            pending = frame
+          }
+        }
+        // 整段结束：没有正文才补（思维链当正文），有正文就原样发
+        if (pending) {
+          if (!sawContent) {
+            const patched = withContentFallback(pending, { sawContent, reasoning })
+            if (hasContentText(patched)) sawContent = true
+            emit(patched)
+          } else {
+            emit(pending)
+          }
+        }
       } catch (err) {
         push(`data: ${JSON.stringify({ error: { message: `上游流式中断: ${err?.message || err}` } })}\n\n`)
       } finally {
@@ -203,6 +271,8 @@ export async function aggregate(upstream, modelHint) {
   const toolCalls = [...acc.toolCalls.values()]
   const message = {
     role: 'assistant',
+    // ★ 思维链绝不进 content：只有整段都没有正文（模型把答案写进了思维链），
+    //   才把思维链当正文。有一段正文就只给正文。
     content: acc.content || (acc.content === '' && acc.reasoning ? acc.reasoning : acc.content),
   }
   if (acc.reasoning) message.reasoning_content = acc.reasoning

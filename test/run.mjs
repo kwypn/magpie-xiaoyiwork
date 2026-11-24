@@ -134,6 +134,95 @@ await t('★ Kimi K3.1 Pro：content 空但 reasoning 有内容 → 补 content'
   assert.ok(out.choices[0].message.content.length > 0, 'content 仍为空')
 })
 
+/* ---------------------- ★ 思维链侧漏（2026-11-24 实测踩到） ------------------ */
+/*
+ * Kimi 的每一帧都只有 reasoning_content、content 是空的，思维链一段段吐，
+ * 正文在最后几帧才来。
+ * 之前的兜底是**逐帧**判断「这帧 content 为空吗」→ 永远成立 →
+ * 每帧都把思维链复制进 content → 客户端看到的是
+ * 「I'll respond to the user asking ...」这样的思维链正文（就是「思考段漏到会话里」）。
+ *
+ * 正确行为：整段流里出现过一次真正的 content，就原样透传，思维链绝不进 content。
+ */
+
+/** 跑一遍 transformSse，返回客户端看到的 content / reasoning_content */
+async function clientView(sse) {
+  const reader = transformSse(new Blob([sse]).stream(), 'Kimi_K3.1_Pro_VE').getReader()
+  const dec = new TextDecoder()
+  let content = ''
+  let reasoning = ''
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    const text = dec.decode(value, { stream: true })
+    for (const block of text.split('\n\n')) {
+      const data = block
+        .split('\n')
+        .filter((l) => l.startsWith('data:'))
+        .map((l) => l.slice(5).trim())
+        .join('')
+      if (!data || data === '[DONE]') continue
+      let f
+      try {
+        f = JSON.parse(data)
+      } catch {
+        continue
+      }
+      const d = f.choices?.[0]?.delta
+      if (!d) continue
+      if (typeof d.content === 'string') content += d.content
+      if (typeof d.reasoning_content === 'string') reasoning += d.reasoning_content
+    }
+  }
+  return { content, reasoning }
+}
+
+await t('★ 思维链不进 content（Kimi 每帧只有 reasoning，正文最后才来）', async () => {
+  // 真 Kimi 的形状：前面全是思维链帧，最后几帧才是正文
+  const sse = [
+    'data: {"choices":[{"delta":{"role":"assistant","reasoning_content":"I need respond in Chinese"}}]}',
+    '',
+    'data: {"choices":[{"delta":{"reasoning_content":" user asks what model"}}]}',
+    '',
+    'data: {"choices":[{"delta":{"reasoning_content":" I should say Kimi"}}]}',
+    '',
+    'data: {"choices":[{"delta":{"content":"我是 Kimi"}}]}',
+    '',
+    'data: {"choices":[{"delta":{"content":"，由月之暗面开发。"}}]}',
+    '',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"total_tokens":30}}',
+    '',
+  ].join('\n')
+  const { content, reasoning } = await clientView(sse)
+  assert.equal(content, '我是 Kimi，由月之暗面开发。', `content 不对：${JSON.stringify(content)}`)
+  assert.ok(!content.includes("I need respond"), '★ 思维链漏进了 content')
+  assert.ok(reasoning.includes('I need respond'), '思维链本身丢了')
+})
+
+await t('★ 整段都没有正文时，思维链才当正文（真的把答案写进思维链的场景）', async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"reasoning_content":"答案是42"}}]}',
+    '',
+    'data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}',
+    '',
+  ].join('\n')
+  const { content, reasoning } = await clientView(sse)
+  assert.equal(content, '答案是42', `content 不对：${JSON.stringify(content)}`)
+  assert.ok(reasoning.includes('答案是42'), '思维链本身丢了')
+})
+
+await t('★ 聚合路径同样不把思维链塞进 content', async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"reasoning_content":"思考中"}}]}',
+    '',
+    'data: {"choices":[{"delta":{"content":"最终答案"}}]}',
+    '',
+  ].join('\n')
+  const out = await aggregate(new Blob([sse]).stream(), 'Kimi_K3.1_Pro_VE')
+  assert.equal(out.choices[0].message.content, '最终答案')
+  assert.equal(out.choices[0].message.reasoning_content, '思考中')
+})
+
 await t('transformSse 补 [DONE]', async () => {
   const sse = 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
   const stream = new Blob([sse]).stream()

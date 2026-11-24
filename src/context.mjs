@@ -52,9 +52,10 @@ export const PRD_PKG_NAME = 'com.huawei.hmos.vassistant'
 export const GRAY_MODELS = new Set(['Kimi_K3.1_Pro_VE'])
 
 /**
- * Kimi K3.1 Pro 的已知上游行为（插件必须兜住的两个坑）：
- *   ① reasoning_content 有内容但 content 为空 —— 长上下文/受限场景下模型把答案写进思维链。
- *      → 见 src/sse.mjs 的 fallbackToReasoning()。
+ * Kimi K3.1 Pro 的已知上游行为（插件必须兜住的坑）：
+ *   ① 每一帧都只有 reasoning_content、content 是空的，思维链一段段吐、正文最后才来。
+ *      → 兜底必须**整段流**级别做（src/gateway.mjs 的 transformSse/aggregate），
+ *        逐帧兜底会把思维链复制进 content，客户端看到的是思考段（2026-11-24 实测踩到）。
  *   ② 首字延迟可超 110s（慢思考 + 大提示词）—— magpie 默认 60s 会判 502。
  *      → 见 index.mjs 的 provider.patience = 240。
  */
