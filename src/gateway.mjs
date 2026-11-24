@@ -102,6 +102,15 @@ export function frameToText(block, modelHint) {
  *   正确做法：先原样透传整段流；同时记下"有没有见过真正的 content"。
  *   流结束时如果**从头到尾没有过任何 content**，才是真的"模型把答案写进了
  *   思维链"，这时才把 reasoning 补成 content。
+ *
+ * ⚠⚠⚠ 但「没有正文」还有另一种情况：**模型在调工具**（2026-11-25 实测踩到）。
+ *   agent 回合是「思维链 + tool_calls、没有正文」—— 这不是"答案藏在思维链里"，
+ *   而是"模型正在决定调哪个工具"。
+ *   若这时也把思维链补成正文，客户端会拿到：
+ *     content          = 思维链
+ *     reasoning_content= 思维链     ← 同一段话出现两遍
+ *   客户端两个字段都渲染 → **思考内容被输出两次**（用户报的「双重输出」）。
+ *   ⇒ 兜底必须再加一道：**整段出现过 tool_calls 就不补**。
  */
 export function hasContentText(frame) {
   const choices = frame?.choices
@@ -110,6 +119,18 @@ export function hasContentText(frame) {
   const delta = c?.delta ?? c?.message
   const content = delta?.content
   return typeof content === 'string' && content.length > 0
+}
+
+/** 一帧里有没有工具调用（delta.tool_calls / message.tool_calls / function_call） */
+export function hasToolCall(frame) {
+  const choices = frame?.choices
+  if (!Array.isArray(choices) || !choices.length) return false
+  const c = choices[0]
+  const delta = c?.delta ?? c?.message
+  if (Array.isArray(delta?.tool_calls) && delta.tool_calls.length) return true
+  if (delta?.function_call) return true
+  if (c?.finish_reason === 'tool_calls') return true
+  return false
 }
 
 /** 一帧里的 reasoning 文本（没有则空串） */
@@ -123,11 +144,16 @@ export function frameReasoning(frame) {
 
 /**
  * 整段流结束时才用：把「只有思维链、没有正文」的流补一份正文。
- * 有过任何正文 → 原样返回（思维链绝不进 content）。
+ *
+ * 两个前提，缺一不可：
+ *   ① 整段没有出现过正文（sawContent）—— 有正文就原样返回，思维链绝不进 content
+ *   ② 整段没有出现过工具调用（sawToolCall）—— agent 回合本来就该只有 tool_calls，
+ *      把思维链补成正文会让客户端**输出两遍**（content 一份 + reasoning_content 一份）
  */
-export function withContentFallback(frame, { sawContent, reasoning } = {}) {
+export function withContentFallback(frame, { sawContent, sawToolCall, reasoning } = {}) {
   if (!frame || typeof frame !== 'object') return frame
   if (sawContent) return frame
+  if (sawToolCall) return frame
   const text = typeof reasoning === 'string' ? reasoning : ''
   if (!text) return frame
   const choices = frame.choices
@@ -156,14 +182,16 @@ export function transformSse(upstream, modelHint) {
     async start(controller) {
       const reader = upstream.getReader()
       const push = (text) => text && controller.enqueue(encoder.encode(text))
-      // 整段流的账：有没有见过正文、思维链累计了多少
+      // 整段流的账：有没有见过正文、有没有见过工具调用、思维链累计了多少
       let sawContent = false
+      let sawToolCall = false
       let reasoning = ''
       // 最后一帧先扣着：万一段落结束时才知道要补正文，这一帧正好是落点
       let pending = null
       const emit = (frame) => {
         if (!frame) return
         if (hasContentText(frame)) sawContent = true
+        if (hasToolCall(frame)) sawToolCall = true
         const r = frameReasoning(frame)
         if (r) reasoning += r
         push(`data: ${JSON.stringify(frame)}\n\n`)
@@ -194,10 +222,10 @@ export function transformSse(upstream, modelHint) {
             pending = frame
           }
         }
-        // 整段结束：没有正文才补（思维链当正文），有正文就原样发
+        // 整段结束：只有「既没有正文、也没有工具调用」才补（思维链当正文）
         if (pending) {
-          if (!sawContent) {
-            const patched = withContentFallback(pending, { sawContent, reasoning })
+          if (!sawContent && !sawToolCall) {
+            const patched = withContentFallback(pending, { sawContent, sawToolCall, reasoning })
             if (hasContentText(patched)) sawContent = true
             emit(patched)
           } else {
@@ -271,9 +299,14 @@ export async function aggregate(upstream, modelHint) {
   const toolCalls = [...acc.toolCalls.values()]
   const message = {
     role: 'assistant',
-    // ★ 思维链绝不进 content：只有整段都没有正文（模型把答案写进了思维链），
-    //   才把思维链当正文。有一段正文就只给正文。
-    content: acc.content || (acc.content === '' && acc.reasoning ? acc.reasoning : acc.content),
+    // ★ 思维链绝不进 content：
+    //   只有「既没有正文、也没有工具调用」时（模型真把答案写进了思维链），
+    //   才把思维链当正文。
+    //   agent 回合（思维链 + tool_calls、没有正文）**不能**补 ——
+    //   补了客户端会输出两遍（content + reasoning_content 各一份）。
+    content:
+      acc.content ||
+      (acc.content === '' && acc.reasoning && toolCalls.length === 0 ? acc.reasoning : acc.content),
   }
   if (acc.reasoning) message.reasoning_content = acc.reasoning
   if (toolCalls.length) message.tool_calls = toolCalls

@@ -211,6 +211,43 @@ await t('★ 整段都没有正文时，思维链才当正文（真的把答案�
   assert.ok(reasoning.includes('答案是42'), '思维链本身丢了')
 })
 
+await t('★★ agent 回合（思维链 + tool_calls、没有正文）→ 思维链绝不进 content', async () => {
+  // Kimi 在 agent 循环里就是这个样子：先想（思维链），再调工具，全程没有正文。
+  // 若此时把思维链补成正文，客户端会拿到 content 一份 + reasoning_content 一份
+  // → 同一段思考被输出两遍（用户报的「双重输出」）。
+  const sse = [
+    'data: {"choices":[{"delta":{"role":"assistant","reasoning_content":"我需要先看目录"}}]}',
+    '',
+    'data: {"choices":[{"delta":{"reasoning_content":"，然后读文件"}}]}',
+    '',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]}}]}',
+    '',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"total_tokens":30}}',
+    '',
+  ].join('\n')
+  const { content, reasoning } = await clientView(sse)
+  assert.ok(!content.includes('我需要先看目录'), `★ 思维链漏进了 content：${JSON.stringify(content)}`)
+  assert.equal(content, '', `content 应该为空，却有：${JSON.stringify(content)}`)
+  assert.ok(reasoning.includes('我需要先看目录'), '思维链本身丢了')
+})
+
+await t('★★ 聚合路径：agent 回合的思维链也不进 content', async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"reasoning_content":"我需要先看目录"}}]}',
+    '',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]}}]}',
+    '',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"total_tokens":30}}',
+    '',
+  ].join('\n')
+  const out = await aggregate(new Blob([sse]).stream(), 'Kimi_K3.1_Pro_VE')
+  const msg = out.choices[0].message
+  assert.ok(!msg.content.includes('我需要先看目录'), `★ 思维链漏进了 content：${JSON.stringify(msg.content)}`)
+  assert.equal(msg.content, '', `content 应该为空，却有：${JSON.stringify(msg.content)}`)
+  assert.ok(msg.reasoning_content.includes('我需要先看目录'), '思维链本身丢了')
+  assert.ok(Array.isArray(msg.tool_calls) && msg.tool_calls.length === 1, 'tool_calls 丢了')
+})
+
 await t('★ 聚合路径同样不把思维链塞进 content', async () => {
   const sse = [
     'data: {"choices":[{"delta":{"reasoning_content":"思考中"}}]}',
